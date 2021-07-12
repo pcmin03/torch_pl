@@ -1,0 +1,14 @@
+opt_gpus : '2'
+gpus : 1
+randomseed : 2021
+base_path : /nfs3/cmpark/preprocessing_work/her2sample/samplfile_256
+label_path : /nfs3/cmpark/preprocessing_work/her2sample/result2.json
+batchsize : 300
+lr : 0.0001
+epochs : 200 
+checkpoint_path : ./checkpoint/her2model_repeat
+tensorboard_path : ./testlog
+modelname : resnet18
+Training : True
+
+

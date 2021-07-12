@@ -1,0 +1,19 @@
+opt_gpus : '0'
+gpus : 1
+randomseed : 2021
+# her2
+base_path : /nfs3/cmpark/preprocessing_work/script/ASAN_testset/20210707lv0_PATCH/
+label_path : /nfs3/cmpark/dataset/amc_erprher2/label/ 
+batchsize : 300
+lr : 0.0001
+epochs : 200 
+checkpoint_path : ./her2model_repeat/base
+tensorboard_path : logs
+modelname : resnet18
+Training : False
+wsin : 2
+roin : 0
+WSIsave : True
+useopenslide : False
+resultpath : result
+
