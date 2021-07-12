@@ -60,7 +60,7 @@ class inferHER2Dataset(Dataset):
         self.images = images
         self.stage = stage
         self.isimg = npimg 
-        self.ToTensor = ToTensorV2()
+
     def __len__(self): 
         return len(self.images) 
 
@@ -68,14 +68,14 @@ class inferHER2Dataset(Dataset):
         if self.isimg == True: 
             image, xylocat = self.images[idx]
             sample = self.transform(image=image)
-            return sample['image'],xylocat,self.ToTensor(image = image.copy().astype(np.float32) / 255.)['image']
+            return sample['image'],xylocat
 
         elif self.isimg == False: 
             image = cv2.imread(self.images[idx])[:,:,::-1]
             sample = self.transform(image=image)
             imagepath = self.images[idx]
             
-            return sample['image'],imagepath, image.copy().astype(np.float32) / 255.
+            return sample['image'],imagepath
 
 
         

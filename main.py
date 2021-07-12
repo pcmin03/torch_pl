@@ -1,56 +1,31 @@
-import random , os , itertools, yaml,argparse
-from pandas.io.sql import read_sql_query
-import numpy as np
-from glob import glob
-from natsort import natsorted
-
-# torch code
+import json 
 import pytorch_lightning as pl
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import torchsummary
-
 from pytorch_lightning.callbacks import EarlyStopping,ModelCheckpoint,LearningRateMonitor
+from pytorch_lightning.callbacks import Callback
 from pytorch_lightning.loggers import TensorBoardLogger
-from torch.optim.lr_scheduler import ExponentialLR
-from torchmetrics.functional import accuracy
 
-# my code
-from HER2dataloader import HER2dataloderpl , inferHER2dataloderpl
+
 from utils import *
-from models import choosemodel
-from pytorch_grad_cam import GradCAM,ScoreCAM
+from HER2dataloader import dataloderpl , inferdataloderpl
+from models import resnet
+from torch.optim.lr_scheduler import ExponentialLR
+import torch.nn.functional as F
+from torchmetrics.functional import accuracy
+import itertools
+import torchvision
 import cv2
+import random 
+from glob import glob
 
-def reshape_transform(tensor, height=7, width=7):
-    result = tensor.reshape(tensor.size(0), 
-        height, width, tensor.size(2))
-
-    # Bring the channels to the first dimension,
-    # like in CNNs.
-    result = result.transpose(2, 3).transpose(1, 2)
-    return result
-
-
-class HER2classify(pl.LightningModule): 
-    def __init__(self,model,lr,opt): 
+import os
+class classify(pl.LightningModule): 
+    def __init__(self,model,lr): 
         super().__init__()
-        self.save_hyperparameters(opt)
-        self.opt = opt
         self.encoder = model
         self.lr = lr
         self.val_collector, self.train_collector = [] , []
-        # self.hparams = opt
-
-        # self.weight = torch.tensor([0.9, 0.76740331, 0.8       , 0.92320442, 0.93314917],dtype=torch.float32).to('cuda:0')
-        self.weight = torch.tensor([1,1,1,1,1],dtype=torch.float32).to('cuda:0')
-        
-        #### add grad cam 
-        print(" ####Use Grad cam!!!!###")
-        target_layer = model.layer4[-1]
-        print(target_layer)
-        self.cam = GradCAM(model=model,target_layer=target_layer,use_cuda=True)
-        self.cam.batchsize = self.opt['batchsize']
+        self.weight = torch.tensor([0.9, 0.76740331, 0.8       , 0.92320442, 0.93314917],dtype=torch.float32).to('cuda:0')
+        # self.weight = torch.tensor([1,1,1,1,1],dtype=torch.float32).to('cuda:0')
 
         # checkpoint = torch.load()
     
@@ -86,9 +61,9 @@ class HER2classify(pl.LightningModule):
 
         ## plot confusion matric        
         collector = np.array(collector)
-        y = list(itertools.chain(*collector[:,0]))
-        preds = list(itertools.chain(*collector[:,1]))
-        print(len(y),len(preds))
+        y = list(itertools.chain(*itertools.chain(*collector[:,0])))
+        preds = list(itertools.chain(*itertools.chain(*collector[:,1])))
+
         plt.figure(figsize = (10,7))
         conf_matric,np_matric = confusionmatric(y,preds)
         plt.close(conf_matric)
@@ -106,7 +81,7 @@ class HER2classify(pl.LightningModule):
                 # self.log(f'{phase}_{key}',value,self.current_epoch)
 
     def shared_step(self,batch,phase:str,evalu:bool): 
-        x,y,_  = batch 
+        x,y  = batch 
         pred = self.encoder(x)
         loss = F.cross_entropy(pred,y,weight=self.weight)
         
@@ -121,9 +96,9 @@ class HER2classify(pl.LightningModule):
         loss =self.shared_step(batch,phase,True)
         self.log(f'{phase}_loss',loss, prog_bar=True, logger=True)
         
-        al_batch = batch[0:2]+[self.preds]
+        al_batch = batch+[self.preds]
         _,y,preds = list(map(lambda x: x.detach().cpu().numpy(),al_batch))
-        self.train_collector.append([y,preds])
+        self.train_collector.append([[y],[preds]])
         
         return loss 
 
@@ -137,11 +112,11 @@ class HER2classify(pl.LightningModule):
         loss = self.shared_step(batch,phase,True)   
         self.log(f'{phase}_loss',loss, prog_bar=True, logger=True)
         
-        al_batch = batch[0:2]+[self.preds]
+        al_batch = batch+[self.preds]
         x,y,preds = list(map(lambda x: x.detach().cpu().numpy(),al_batch))
         
         self.plot_gridimg(x,y,preds,5,phase)
-        self.val_collector.append([y,preds])
+        self.val_collector.append([[y],[preds]])
         
         return loss 
     
@@ -152,19 +127,17 @@ class HER2classify(pl.LightningModule):
     def test_step(self,batch, batch_idx): 
 
         phase='test'
-        self.inimg,self.orimg = batch[0],batch[2]
+        
         preds = torch.argmax(self.forward(batch),dim=1).detach().cpu().numpy()
-
         # self.log(f'{phase}_loss',loss, prog_bar=True, logger=True)
         # x,y,preds = list(map(lambda x: x.detach().cpu().numpy(),al_batch))
         # self.plot_gridimg(x,y,preds,5,phase)
         
-        self.val_collector.append([preds,batch[1]])
+        self.val_collector.append([preds,batch[1].cpu().numpy()])
     
     def test_epoch_end(self,test_step_outputs): 
         # confusion matric
         # self.plot_confusionmatric(self.val_collector,'test',True)
-        
         return self.val_collector
 
     def configure_optimizers(self): 
@@ -182,23 +155,26 @@ class HER2classify(pl.LightningModule):
     
 if __name__ == '__main__':
     ### config list
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--yamldir',default='./config.yaml', type=str)
-    args = parser.parse_args()
-    # load yaml config file
+    os.environ['CUDA_VISIBLE_DEVICES'] = "5"
+    resetseed(2021)
+
+    # fulllabel
+    base_path = '/want/to/path'
+    label_path = '/want/to/path'
+
+    classname = ('class1','class2','class3','class4','5')
+    batchsize=300
+    lr = 1e-5
+    epochs = 100
+    gpu = 1
+    save_name = './model/base'
+    modelname = 'resnet18'
     
-    with open(args.yamldir) as f: 
-        opt = yaml.load(f, Loader=yaml.FullLoader)
-
-    os.environ['CUDA_VISIBLE_DEVICES'] = opt['opt_gpus']
-    resetseed(opt['randomseed'])
-
-    # set a callback function 
-    ####
+    # 
     checkpoint_callback = ModelCheckpoint(
                         monitor='valid_loss',
-                        dirpath=opt['checkpoint_path'],
-                        filename='PathQuant_her2-{epoch:03d}-{valid_loss:.4f}',
+                        dirpath=save_name,
+                        filename='model-{epoch:03d}-{valid_loss:.4f}',
                         save_top_k=3,
                         mode='min')
 
@@ -209,90 +185,40 @@ if __name__ == '__main__':
                                 mode='min')
 
     lr_monitor = LearningRateMonitor(logging_interval='step')
-    ####
+    # dataset module
+
+    # dataset inferencedataload
+    wsin, roin = 1,0
+    her2data = inferdataloderpl(base_path,label_path,wsin,roin,batchsize)
+    
+    # define her2model 
+
+    last_savename = glob(f'{save_name}/*')[-1]
+    print(last_savename)
+    model = classify.load_from_checkpoint(checkpoint_path=last_savename,model=resnet(5,True,modelname),lr=lr)
 
     # set tensorboard 
-    tb_logger = TensorBoardLogger(opt['tensorboard_path'],name=opt['checkpoint_path'])
-    
+    tb_logger = TensorBoardLogger('./logs',name=save_name)
     # set a trainer 
+    
     trainer = pl.Trainer(
-                        max_epochs=opt['epochs'], 
-                        gpus = opt['gpus'],
-                        default_root_dir=opt['checkpoint_path'],
+                        max_epochs=epochs, 
+                        gpus = gpu,
+                        # default_root_dir=save_name,
+                        # checkpoint_callback =checkpoint_callback,
                         logger = tb_logger,
-                        check_val_every_n_epoch=1,
-                        callbacks=[lr_monitor,ealrystopping,checkpoint_callback])
+                        callbacks=[lr_monitor,checkpoint_callback])
     
-    # select model 
-    mymodel = choosemodel(5,True,opt['modelname'])
-    # dataset module
-    if opt['Training'] == True:
-        her2data = HER2dataloderpl(opt['base_path'], opt['label_path'],opt['batchsize'])
-        model = HER2classify(mymodel,opt['lr'],opt)
+    # trainer.fit(model,her2data)
+    # train
+    trainer.fit(model,her2data)
+    useopenslide = True
 
-        torchsummary.summary(model,(1,3,256,256),device='cpu')
-        # torchsummary()
-        trainer.fit(model,her2data)
+    her2data.setup(stage='test',useopenslide=useopenslide)
+    trainer.test(model,datamodule=her2data)
+
+    result = np.stack(np.array(model.val_collector),axis=1)
     
-    # dataset inferencedataload
-    else: 
-        her2data = inferHER2dataloderpl(opt['base_path'], opt['base_path'],opt['wsin'],opt['roin'],opt['batchsize'])
-        checkpath = opt['checkpoint_path']
-        last_savename = natsorted(glob(f'{checkpath}/*.ckpt'))[-1] # import last checkpoint
-        model = HER2classify.load_from_checkpoint(checkpoint_path=last_savename,model=mymodel,lr=opt['lr'],opt=opt)
-
-        her2data.setup(stage='test',useopenslide=opt['useopenslide'])
-        
-        # n = 80
-        # sample,orimg = next(iter(her2data.test_dataloader()))[0],next(iter(her2data.test_dataloader()))[2]
-        
-        ### grad cam ####
-        ####################################################################################
-        # sample = sample[n:n+1]
-        # orimg = orimg[n]
-        # print(sample.shape,'123123')
-        # mymodel.eval().cuda()
-        # target_layer = mymodel.layer4[-1]
-        # cam = GradCAM(model=model,target_layer=target_layer,use_cuda=True)
-        # cam.batchsize = opt['batchsize']
-
-        # cv2.imwrite('origin.png',(orimg.numpy()*255).astype(np.uint8)[:,:,::-1])
-        # grayscale_cam = cam(input_tensor=sample.unsqueeze(0),target_category=0,)
-        # cam_image=  show_cam_on_image(orimg.numpy()[:,:,::-1],grayscale_cam[0,:],use_rgb=False)
-        # cv2.imwrite('camsample1.png',cam_image)
-        # grayscale_cam = cam(input_tensor=sample.unsqueeze(0),target_category=1)
-        # cam_image=  show_cam_on_image(orimg.numpy()[:,:,::-1],grayscale_cam[0,:],use_rgb=False)
-        # cv2.imwrite('camsample2.png',cam_image)
-        # grayscale_cam = cam(input_tensor=sample.unsqueeze(0),target_category=2)
-        # cam_image=  show_cam_on_image(orimg.numpy()[:,:,::-1],grayscale_cam[0,:],use_rgb=False)
-        # cv2.imwrite('camsample3.png',cam_image)
-        # grayscale_cam = cam(input_tensor=sample.unsqueeze(0),target_category=3)
-        # cam_image=  show_cam_on_image(orimg.numpy()[:,:,::-1],grayscale_cam[0,:],use_rgb=False)
-        # cv2.imwrite('camsample4.png',cam_image)
-        # grayscale_cam = cam(input_tensor=sample.unsqueeze(0),target_category=4)
-        # cam_image=  show_cam_on_image(orimg.numpy()[:,:,::-1],grayscale_cam[0,:],use_rgb=False)
-        # cv2.imwrite('camsample5.png',cam_image)
-        # grayscale_cam = cam(input_tensor=sample.unsqueeze(0),target_category=5)
-        # cam_image=  show_cam_on_image(orimg.numpy(),grayscale_cam[n,:],use_rgb=False)
-        # cv2.imwrite('camsample6.png',cam_image)
-        ########################################################################################
-
-        trainer.test(model,datamodule=her2data)
-        
-        if opt['WSIsave'] == True: 
-            result = np.stack(np.array(model.val_collector),axis=1)        
-            score =list(itertools.chain(*result[0]))
-            resultpath =list(itertools.chain(*result[1]))
-
-            #save classify result usimg pilot model 
-            # basepathes = opt['base_path']
-            # savecsv([resultpath,score],f'{basepathes}')
-
-            if opt['useopenslide'] == True:
-                location = np.array(resultpath)
-                patchimages = her2data.images
-                recover_wsi(patchimages,opt['label_path'],location,score,opt['checkpoint_path'])
-
-            elif opt['useopenslide'] == False:
-                make_wsi(resultpath,opt['label_path'],opt['wsin'],opt['roin'],score,opt['checkpoint_path'])
+    score =list(itertools.chain(*result[0]))
+    resultpath =list(itertools.chain(*result[1]))
 
